@@ -57,6 +57,8 @@
   .seg.hit { background:rgba(47,109,246,.12); outline:1px solid var(--accent); }
   .seg .who { font-weight:600; font-size:13px; }
   .seg .t { color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; margin-right:8px; }
+  select { font:inherit; padding:7px 10px; border-radius:8px; border:1px solid var(--line);
+           background:var(--card); color:var(--ink); max-width:320px; }
   .speakers { display:flex; gap:8px; flex-wrap:wrap; align-items:center; font-size:12.5px;
               color:var(--muted); margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid var(--line); }
   .chip.unnamed { border-style:dashed; color:var(--warn); display:inline-flex; gap:6px; align-items:center; }
@@ -78,7 +80,8 @@
   <div class="toolbar">
     <button class="primary" id="demo">Разобрать пример</button>
     <button id="pick">Загрузить запись…</button>
-    <input type="file" id="file" accept="audio/*" hidden>
+    <input type="file" id="file" accept="audio/*,video/*" hidden>
+    <select id="history" title="Ранее разобранные совещания"></select>
     <span class="hint" id="status"></span>
   </div>
 
@@ -95,6 +98,25 @@ function fmtTime(sec) {
 }
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, c => (
   { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// Список прошлых разборов: удобно вернуться к результату, не загружая файл заново.
+async function loadHistory(selected) {
+  try {
+    const list = await fetch("/api/meetings").then(r => r.json());
+    const select = $("history");
+    select.hidden = list.length === 0;
+    select.innerHTML = '<option value="">Прошлые разборы…</option>' + list.map(m =>
+      `<option value="${m.id}"${m.id === selected ? " selected" : ""}>` +
+      `${esc(m.created_at.slice(5, 16))} — ${esc(m.title)} (${m.tasks})</option>`).join("");
+  } catch (e) { /* сервер ещё поднимается */ }
+}
+
+async function openMeeting(id) {
+  if (!id) return;
+  const data = await fetch(`/api/meetings/${id}`).then(r => r.json());
+  current = data;
+  render(data);
+}
 
 async function loadModes() {
   try {
@@ -118,6 +140,7 @@ async function analyze(payload, note) {
     if (!res.ok) throw new Error(data.error || "не удалось разобрать");
     current = data;
     render(data);
+    loadHistory(data.id);
     $("status").textContent = "";
   } catch (e) {
     $("status").textContent = "Ошибка: " + e.message;
@@ -260,7 +283,10 @@ $("file").addEventListener("change", async (e) => {
   e.target.value = "";
 });
 
+$("history").addEventListener("change", (e) => openMeeting(e.target.value));
+
 loadModes();
+loadHistory();
 </script>
 </body>
 </html>
