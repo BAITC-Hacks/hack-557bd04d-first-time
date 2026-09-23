@@ -50,6 +50,15 @@ def _ordinal(word):
             return value
     return None
 
+# Сроки чаще называют словами, чем цифрами: «за две недели», «через месяц».
+WORD_COUNTS = {
+    "один": 1, "одну": 1, "одного": 1, "два": 2, "две": 2, "двух": 2,
+    "три": 3, "трёх": 3, "трех": 3, "четыре": 4, "четырёх": 4, "четырех": 4,
+    "пять": 5, "пяти": 5, "шесть": 6, "шести": 6, "семь": 7, "семи": 7,
+    "десять": 10, "десяти": 10, "полторы": 1, "пару": 2, "несколько": 3,
+}
+UNIT_DAYS = {"дн": 1, "день": 1, "ден": 1, "недел": 7, "месяц": 30, "месяце": 30}
+
 SOON_DAYS = 2  # за сколько дней до срока поручение считается горящим
 
 
@@ -112,12 +121,24 @@ def parse(due_text, meeting_date):
         following = (meeting_date.replace(day=28) + datetime.timedelta(days=4))
         return following - datetime.timedelta(days=following.day)
 
-    match = re.search(r"(\d+)\s*(дн|недел|мес)", text)
-    if match:
-        count = int(match.group(1))
-        unit = match.group(2)
-        days = count if unit == "дн" else count * 7 if unit == "недел" else count * 30
-        return meeting_date + datetime.timedelta(days=days)
+    # «на этой неделе» — считаем до ближайшей пятницы
+    if "этой недел" in text or "текущей недел" in text:
+        return _next_weekday(meeting_date, 4)
+
+    # «за две недели», «через месяц», «за 10 дней» — период словами или цифрами
+    words = text.split()
+    for index, word in enumerate(words):
+        unit = next((days for stem, days in UNIT_DAYS.items() if word.startswith(stem)), None)
+        if unit is None:
+            continue
+        count = 1
+        if index:
+            previous = words[index - 1]
+            if previous.isdigit():
+                count = int(previous)
+            elif previous in WORD_COUNTS:
+                count = WORD_COUNTS[previous]
+        return meeting_date + datetime.timedelta(days=count * unit)
 
     return None
 
