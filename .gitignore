@@ -1,0 +1,19 @@
+# Секреты — никогда в репозиторий
+.env
+*.key
+
+# Данные прогонов
+storage/
+*.wav
+*.mp3
+*.m4a
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
