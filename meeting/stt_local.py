@@ -25,7 +25,20 @@ MODELS_DIR = ROOT / "models"
 
 # Порог схожести голосов: выше — та же реплика того же человека.
 SPEAKER_THRESHOLD = float(os.environ.get("SPEAKER_THRESHOLD", "0.62"))
+# Ниже этого слово почти наверняка не расслышано, а придумано декодером.
+MIN_WORD_CONF = float(os.environ.get("MIN_WORD_CONF", "0.30"))
+# Пауза между словами, после которой начинается новая реплика, секунды.
+PAUSE_SPLIT = float(os.environ.get("PAUSE_SPLIT", "0.9"))
 CHUNK = 8000
+
+
+def _utterance(words, spk):
+    return {
+        "start": round(words[0]["start"], 2),
+        "end": round(words[-1]["end"], 2),
+        "text": " ".join(w["word"] for w in words),
+        "spk": spk,
+    }
 
 _model_cache = {}
 
@@ -71,13 +84,21 @@ def _ffmpeg():
         return "ffmpeg"
 
 
-def to_wav(src):
+# Фильтры ffmpeg перед распознаванием. По умолчанию выключены: на нашей тестовой
+# записи с телефона подавление шума сделало хуже — уверенность упала с 0.860 до
+# 0.844, а реплики склеились. Оставлено настройкой для заведомо шумных записей,
+# разумное значение: highpass=f=80,dynaudnorm=f=150:g=15
+AUDIO_FILTERS = os.environ.get("AUDIO_FILTERS", "")
+
+
+def to_wav(src, clean=True):
     """Любой аудио- или видеофайл -> WAV 16 кГц моно, как ждёт Vosk."""
     dst = Path(tempfile.gettempdir()) / ("stt_%s.wav" % os.getpid())
-    proc = subprocess.run(
-        [_ffmpeg(), "-y", "-i", str(src), "-ar", "16000", "-ac", "1", "-f", "wav", str(dst)],
-        capture_output=True, text=True, errors="replace",
-    )
+    command = [_ffmpeg(), "-y", "-i", str(src)]
+    if clean and AUDIO_FILTERS:
+        command += ["-af", AUDIO_FILTERS]
+    command += ["-ar", "16000", "-ac", "1", "-f", "wav", str(dst)]
+    proc = subprocess.run(command, capture_output=True, text=True, errors="replace")
     if proc.returncode != 0 or not dst.exists():
         raise LocalSttError("ffmpeg не смог прочитать файл: " + (proc.stderr or "")[-300:])
     return dst
@@ -128,16 +149,24 @@ def _recognize(wav_path, model_path, spk_model):
     def collect(raw):
         result = json.loads(raw)
         words = result.get("result") or []
-        text = (result.get("text") or "").strip()
-        if not text or not words:
+        if not words:
             return
         confidences.extend(w.get("conf", 0.0) for w in words)
-        utterances.append({
-            "start": round(words[0]["start"], 2),
-            "end": round(words[-1]["end"], 2),
-            "text": text,
-            "spk": result.get("spk"),
-        })
+        # Слова с очень низкой уверенностью — это почти всегда шум, распознанный
+        # как речь. В стенограмме они мешают читать, а модель разбора сбивают.
+        kept = [w for w in words if w.get("conf", 0.0) >= MIN_WORD_CONF]
+        if not kept:
+            return
+        # Vosk отдаёт реплику целиком до длинной паузы: на непрерывной речи это
+        # простыня на полминуты. Режем по паузам между словами.
+        chunk = [kept[0]]
+        for word in kept[1:]:
+            if word["start"] - chunk[-1]["end"] > PAUSE_SPLIT:
+                utterances.append(_utterance(chunk, result.get("spk")))
+                chunk = []
+            chunk.append(word)
+        if chunk:
+            utterances.append(_utterance(chunk, result.get("spk")))
 
     while True:
         data = audio.readframes(CHUNK)
