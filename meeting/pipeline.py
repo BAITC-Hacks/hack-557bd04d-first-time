@@ -86,7 +86,9 @@ def _tokens_to_segments(tokens):
     """Склеиваем токены в реплики: новая реплика — когда сменился говорящий."""
     segments = []
     for tok in tokens:
-        speaker = str(tok.get("speaker") or "Спикер")
+        # Soniox отдаёт безличные метки «1», «2» — сразу делаем их читаемыми.
+        raw = str(tok.get("speaker") or "").strip()
+        speaker = "Спикер " + raw if raw.isdigit() else (raw or "Спикер")
         text = tok.get("text", "")
         start = (tok.get("start_ms") or 0) / 1000.0
         end = (tok.get("end_ms") or 0) / 1000.0
@@ -154,6 +156,7 @@ PROMPT = """Ты составляешь протокол рабочего сов
 Тебе дана стенограмма с таймкодами и говорящими. Верни СТРОГО JSON:
 
 {
+  "speakers": {"метка говорящего": "имя или null"},
   "title": "короткое название совещания",
   "summary": "2-3 предложения: о чём договорились",
   "decisions": ["принятое решение", ...],
@@ -174,10 +177,21 @@ PROMPT = """Ты составляешь протокол рабочего сов
 2. Не выдумывай ответственных и сроки. Не названо — ставь null и confidence ниже 0.6.
 3. Поручение — это то, что кто-то обязался или кого-то попросили сделать. Общие рассуждения не поручения.
 4. Если поручений нет, верни пустой список.
+5. "speakers": расшифровка говорящих. Распознавание речи даёт безличные метки
+   («1», «2»), а имена звучат в разговоре при обращении: если кто-то говорит
+   «Тимур, сможешь…», то отвечающий следующим — Тимур. Имя, которое в
+   стенограмме не прозвучало, не придумывай: ставь null.
+6. Если человек берёт задачу на себя («я сам этим займусь», «я подготовлю»),
+   ответственный — тот, кто это сказал. Подставь его имя, а если оно неизвестно —
+   метку его говорящего.
 
 Стенограмма:
 {transcript}
 """
+
+# Обороты, которыми человек берёт задачу на себя: ответственный — сам говорящий.
+SELF_ASSIGN = ("я сам", "я сама", "я займ", "я возьм", "беру на себя",
+               "я подготов", "я сделаю", "я договор", "я напишу", "я посмотрю")
 
 
 def _format_transcript(segments):
@@ -210,6 +224,39 @@ def _ground(items, segments):
         if not item["grounded"]:
             item["confidence"] = min(float(item.get("confidence") or 0.5), 0.4)
             item.setdefault("start", 0)
+    return items
+
+
+def _apply_speaker_names(speakers, segments):
+    """Подставляем распознанные имена вместо безличных меток Soniox.
+
+    Имя принимаем только если оно действительно звучало в стенограмме — тот же
+    принцип, что и с цитатами: модель предлагает, код проверяет.
+    """
+    if not isinstance(speakers, dict):
+        return {}
+    spoken = _normalize(" ".join(s["text"] for s in segments)).split()
+    applied = {}
+    for label, name in speakers.items():
+        name = (name or "").strip()
+        key = _normalize(name).strip()
+        # startswith — чтобы «Тимуру» в тексте подтвердило имя «Тимур»
+        if key and any(word.startswith(key) for word in spoken):
+            applied[str(label)] = name
+    if applied:
+        for seg in segments:
+            seg["speaker"] = applied.get(str(seg["speaker"]), seg["speaker"])
+    return applied
+
+
+def _fill_self_assigned(items):
+    """«Я сам этим займусь» — ответственный тот, кто это произнёс."""
+    for item in items:
+        if not item.get("who") and item.get("said_by"):
+            quote = _normalize(item.get("quote", ""))
+            if any(marker in quote for marker in SELF_ASSIGN):
+                item["who"] = item["said_by"]
+                item["who_from_speaker"] = True
     return items
 
 
@@ -250,7 +297,9 @@ def extract(transcript):
 
     result = _parse_json(text)
     result["analysis_mode"] = "claude"
-    result["action_items"] = _ground(result.get("action_items", []), segments)
+    result["speakers"] = _apply_speaker_names(result.get("speakers"), segments)
+    result["action_items"] = _fill_self_assigned(
+        _ground(result.get("action_items", []), segments))
     return result
 
 

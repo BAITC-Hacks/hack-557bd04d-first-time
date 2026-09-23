@@ -55,6 +55,11 @@
   .seg.hit { background:rgba(47,109,246,.12); outline:1px solid var(--accent); }
   .seg .who { font-weight:600; font-size:13px; }
   .seg .t { color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; margin-right:8px; }
+  .speakers { display:flex; gap:8px; flex-wrap:wrap; align-items:center; font-size:12.5px;
+              color:var(--muted); margin-bottom:12px; padding-bottom:12px; border-bottom:1px solid var(--line); }
+  .chip.unnamed { border-style:dashed; color:var(--warn); display:inline-flex; gap:6px; align-items:center; }
+  .chip.unnamed input { border:none; background:transparent; color:var(--ink);
+                        font:inherit; outline:none; border-bottom:1px solid var(--warn); }
   .empty { color:var(--muted); text-align:center; padding:48px 12px; }
   pre.export { white-space:pre-wrap; font-size:12.5px; background:var(--bg); padding:12px;
                border-radius:8px; border:1px solid var(--line); max-height:320px; overflow:auto; }
@@ -137,6 +142,19 @@ function toMarkdown(m) {
   return lines.join("\n");
 }
 
+// Распознавание различает голоса, но имя знает только если оно прозвучало вслух.
+// Неопознанному говорящему имя даёт человек — и оно расходится по всему протоколу.
+function speakerBar(m) {
+  const names = [...new Set(m.segments.map(s => s.speaker))];
+  return `<div class="speakers">Говорящие: ` + names.map(n =>
+    n.startsWith("Спикер")
+      ? `<span class="chip unnamed">${esc(n)}
+           <input class="rename" data-old="${esc(n)}" placeholder="кто это?" size="9">
+           <button class="rename-ok" data-old="${esc(n)}" title="Сохранить имя">✓</button>
+         </span>`
+      : `<span class="chip who">${esc(n)}</span>`).join(" ") + `</div>`;
+}
+
 function render(m) {
   const items = m.action_items.map(i => `
     <div class="task ${i.status}" data-start="${i.start}">
@@ -184,7 +202,7 @@ function render(m) {
           <pre class="export">${esc(toMarkdown(m))}</pre>
         </div>
       </div>
-      <div class="card"><h2>Стенограмма</h2>${segs}</div>
+      <div class="card"><h2>Стенограмма</h2>${speakerBar(m)}${segs}</div>
     </div>`;
 
   // Клик по поручению подсвечивает момент, откуда оно взято — это и есть проверяемость.
@@ -198,6 +216,23 @@ function render(m) {
 
   $("out").querySelectorAll("[data-act]").forEach(b => b.addEventListener("click", () =>
     setStatus(b.dataset.id, b.dataset.act)));
+
+  async function renameSpeaker(from, to) {
+    if (!to.trim()) return;
+    const res = await fetch(`/api/meetings/${current.id}/speakers`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ from, to: to.trim() }),
+    });
+    if (res.ok) { current = await res.json(); render(current); }
+  }
+
+  $("out").querySelectorAll("input.rename").forEach(inp => inp.addEventListener("keydown", ev => {
+    if (ev.key === "Enter") renameSpeaker(inp.dataset.old, inp.value);
+  }));
+  $("out").querySelectorAll("button.rename-ok").forEach(btn => btn.addEventListener("click", () => {
+    const inp = btn.parentElement.querySelector("input.rename");
+    renameSpeaker(btn.dataset.old, inp ? inp.value : "");
+  }));
 
   $("copy").addEventListener("click", () => {
     navigator.clipboard.writeText(toMarkdown(m));

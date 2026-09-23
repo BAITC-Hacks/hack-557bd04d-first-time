@@ -39,6 +39,29 @@ def list_all():
     return sorted(meetings, key=lambda m: m["created_at"], reverse=True)
 
 
+def rename_speaker(meeting_id, old, new):
+    """Дать говорящему имя вручную.
+
+    Распознавание речи различает голоса, но имя знает только если оно прозвучало
+    вслух. Когда не прозвучало — имя ставит человек, и оно сразу расходится по
+    стенограмме и по ответственным за поручения.
+    """
+    meeting = load(meeting_id)
+    if not meeting or not new.strip():
+        return None
+    new = new.strip()
+    for seg in meeting.get("segments", []):
+        if seg.get("speaker") == old:
+            seg["speaker"] = new
+    for item in meeting.get("action_items", []):
+        for field in ("who", "said_by"):
+            if item.get(field) == old:
+                item[field] = new
+    speakers = meeting.get("speakers") or {}
+    meeting["speakers"] = {k: (new if v == old else v) for k, v in speakers.items()}
+    return save(meeting)
+
+
 def set_status(meeting_id, item_id, status):
     """Человек подтверждает или отклоняет поручение — решение остаётся за ним."""
     meeting = load(meeting_id)

@@ -40,10 +40,14 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _read_json(self):
+        """Битое тело не должно ронять обработчик — отвечаем пустым объектом."""
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0 or length > MAX_BODY:
             return {}
-        return json.loads(self.rfile.read(length).decode("utf-8"))
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8", "replace"))
+        except (ValueError, UnicodeDecodeError):
+            return {}
 
     def log_message(self, fmt, *args):
         sys.stderr.write("  %s\n" % (fmt % args))
@@ -75,8 +79,18 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/analyze":
             return self._analyze()
 
-        # /api/meetings/<id>/items/<item_id>
         parts = [p for p in path.split("/") if p]
+
+        # /api/meetings/<id>/speakers — дать говорящему имя вручную
+        if len(parts) == 4 and parts[0] == "api" and parts[1] == "meetings" and parts[3] == "speakers":
+            payload = self._read_json()
+            old, new = payload.get("from", ""), payload.get("to", "")
+            if not old or not new.strip():
+                return self._send(400, {"error": "нужны непустые поля from и to"})
+            meeting = store.rename_speaker(parts[2], old, new)
+            return self._send(200, meeting) if meeting else self._send(404, {"error": "не найдено"})
+
+        # /api/meetings/<id>/items/<item_id>
         if len(parts) == 5 and parts[0] == "api" and parts[1] == "meetings" and parts[3] == "items":
             status = (self._read_json().get("status") or "").strip()
             if status not in ("pending", "confirmed", "rejected"):
