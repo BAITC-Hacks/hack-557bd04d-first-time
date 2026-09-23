@@ -17,7 +17,7 @@ import urllib.error
 import urllib.request
 
 HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-MODEL = os.environ.get("LOCAL_ANALYSIS_MODEL", "qwen2.5:7b-instruct")
+MODEL = os.environ.get("LOCAL_ANALYSIS_MODEL", "qwen2.5:3b-instruct")
 TIMEOUT = int(os.environ.get("LOCAL_ANALYSIS_TIMEOUT", "900"))
 
 

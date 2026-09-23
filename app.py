@@ -153,6 +153,15 @@ def main():
     print("  разбор совещания:   {}".format(modes["analysis"]))
     if "demo" in modes.values():
         print("  (демо-режим: работает без ключей на примере из samples/)")
+
+    # Греем модели в фоне: сервер отвечает сразу, а к первому разбору они
+    # уже в памяти. Без этого первый пользователь ждёт загрузку с диска.
+    if modes["transcription"] == "local":
+        import threading
+        from meeting import stt_local
+        print("  прогреваю модели распознавания в фоне…")
+        threading.Thread(target=stt_local.warmup, daemon=True).start()
+
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 

@@ -29,6 +29,8 @@ SPEAKER_THRESHOLD = float(os.environ.get("SPEAKER_THRESHOLD", "0.62"))
 MIN_WORD_CONF = float(os.environ.get("MIN_WORD_CONF", "0.30"))
 # Пауза между словами, после которой начинается новая реплика, секунды.
 PAUSE_SPLIT = float(os.environ.get("PAUSE_SPLIT", "0.9"))
+# Сколько секунд с начала записи слушаем, чтобы определить язык.
+PROBE_SECONDS = float(os.environ.get("PROBE_SECONDS", "45"))
 CHUNK = 8000
 
 
@@ -48,8 +50,8 @@ class LocalSttError(RuntimeError):
     pass
 
 
-def available_models():
-    """Какие языковые модели реально лежат на диске."""
+def _scan():
+    """Все языковые модели на диске: {язык: [пути]}."""
     if not MODELS_DIR.exists():
         return {}
     found = {}
@@ -60,11 +62,21 @@ def available_models():
         # vosk-model-small-ru-0.22 -> ru, vosk-model-kz-0.42 -> kz
         for lang in ("ru", "kk", "kz", "en"):
             if "-%s-" % lang in name:
-                # большая модель лучше маленькой — она и остаётся
-                if lang not in found or "small" in found[lang].name:
-                    found[lang] = path
+                found.setdefault(lang, []).append(path)
                 break
     return found
+
+
+def available_models():
+    """Лучшая модель на каждый язык: большая точнее маленькой."""
+    return {lang: sorted(paths, key=lambda p: "small" in p.name)[0]
+            for lang, paths in _scan().items()}
+
+
+def probe_models():
+    """Самая лёгкая модель на язык — ей быстро определяем, на чём говорят."""
+    return {lang: sorted(paths, key=lambda p: "small" not in p.name)[0]
+            for lang, paths in _scan().items()}
 
 
 def _load(path, cls=None):
@@ -74,6 +86,34 @@ def _load(path, cls=None):
         SetLogLevel(-1)  # Vosk иначе заливает консоль отладкой Kaldi
         _model_cache[key] = (SpkModel if cls == "spk" else Model)(str(path))
     return _model_cache[key]
+
+
+def warmup(log=print):
+    """Заранее поднимаем модели в память.
+
+    Большая модель грузится с диска около двух минут, и без прогрева это ждёт
+    первый же пользователь. В сервере модели живут в памяти, поэтому платим
+    один раз при старте, а каждый следующий разбор идёт втрое быстрее.
+    """
+    models = available_models()
+    if not models:
+        return
+    for lang, path in sorted(models.items()):
+        log("  загружаю %s (%s)" % (path.name, lang))
+        _load(path)
+    for lang, path in sorted(probe_models().items()):
+        _load(path)
+    spk = MODELS_DIR / "vosk-model-spk-0.4"
+    if spk.exists():
+        _load(spk, "spk")
+    try:
+        from meeting import diarize
+        if diarize.available():
+            log("  загружаю модели разделения на говорящих")
+            diarize._build()
+    except Exception as exc:
+        log("  диаризация не поднялась: %s" % exc)
+    log("  модели готовы")
 
 
 def _ffmpeg():
@@ -135,8 +175,12 @@ def _assign_speakers(utterances):
     return utterances
 
 
-def _recognize(wav_path, model_path, spk_model):
-    """Один проход одной моделью. Возвращает реплики и среднюю уверенность."""
+def _recognize(wav_path, model_path, spk_model, limit_seconds=None):
+    """Один проход одной моделью. Возвращает реплики и среднюю уверенность.
+
+    limit_seconds ограничивает разбор началом записи — этого достаточно, чтобы
+    понять язык, и не нужно гонять всю запись дважды.
+    """
     from vosk import KaldiRecognizer
 
     audio = wave.open(str(wav_path), "rb")
@@ -145,6 +189,8 @@ def _recognize(wav_path, model_path, spk_model):
     if spk_model is not None:
         recognizer.SetSpkModel(spk_model)
 
+    frame_budget = int(limit_seconds * audio.getframerate()) if limit_seconds else None
+    read_frames = 0
     utterances, confidences = [], []
 
     def collect(raw):
@@ -175,6 +221,9 @@ def _recognize(wav_path, model_path, spk_model):
             break
         if recognizer.AcceptWaveform(data):
             collect(recognizer.Result())
+        read_frames += CHUNK
+        if frame_budget and read_frames >= frame_budget:
+            break
     collect(recognizer.FinalResult())
     audio.close()
 
@@ -194,12 +243,26 @@ def transcribe(audio_path, title=None):
 
     wav_path = to_wav(audio_path)
     try:
-        attempts = []
-        for lang, path in models.items():
-            utterances, confidence = _recognize(wav_path, path, spk_model)
-            attempts.append((confidence, lang, path.name, utterances))
-        attempts.sort(key=lambda a: a[0], reverse=True)
-        confidence, lang, model_name, utterances = attempts[0]
+        # Язык определяем по началу записи лёгкими моделями, а полный проход
+        # делаем один раз и только победившей. Иначе большие модели гоняют всю
+        # запись дважды, и на двух минутах это четыре минуты ожидания.
+        forced = os.environ.get("STT_LANGUAGE", "").strip().lower()
+        probe = []
+        if forced in models:
+            lang = forced
+        elif len(models) == 1:
+            lang = next(iter(models))
+        else:
+            for probe_lang, probe_path in probe_models().items():
+                _, probe_conf = _recognize(wav_path, probe_path, None, PROBE_SECONDS)
+                probe.append({"language": probe_lang, "model": probe_path.name,
+                              "confidence": round(probe_conf, 3)})
+            probe.sort(key=lambda p: p["confidence"], reverse=True)
+            lang = probe[0]["language"]
+
+        model_path = models[lang]
+        utterances, confidence = _recognize(wav_path, model_path, spk_model)
+        model_name = model_path.name
 
         # Отдельная модель диаризации размечает речь точнее, чем вектор голоса
         # на целую реплику Vosk: она видит смену говорящего внутри реплики.
@@ -236,7 +299,6 @@ def transcribe(audio_path, title=None):
             "diarization": diarization,
             "speakers": len({s["speaker"] for s in segments}),
             "confidence": round(confidence, 3),
-            "considered": [{"language": a[1], "model": a[2], "confidence": round(a[0], 3)}
-                           for a in attempts],
+            "language_probe": probe,
         },
     }
