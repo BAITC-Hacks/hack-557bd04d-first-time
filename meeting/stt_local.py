@@ -31,17 +31,89 @@ MIN_WORD_CONF = float(os.environ.get("MIN_WORD_CONF", "0.30"))
 PAUSE_SPLIT = float(os.environ.get("PAUSE_SPLIT", "0.9"))
 # Сколько секунд с начала записи слушаем, чтобы определить язык.
 PROBE_SECONDS = float(os.environ.get("PROBE_SECONDS", "45"))
+# Если модели на пробе разошлись меньше чем на столько, считаем речь смешанной
+# и разбираем обеими, выбирая победителя на каждой реплике.
+MIXED_GAP = float(os.environ.get("MIXED_GAP", "0.12"))
+# Насколько вторая модель должна быть увереннее, чтобы заменить реплику.
+MIXED_MARGIN = float(os.environ.get("MIXED_MARGIN", "0.05"))
 CHUNK = 8000
 
 
-def _utterance(words, spk):
+def _utterance(words, spk, lang=None):
+    confs = [w.get("conf", 0.0) for w in words]
     return {
         "start": round(words[0]["start"], 2),
         "end": round(words[-1]["end"], 2),
         "text": " ".join(w["word"] for w in words),
         "words": words,  # нужны, чтобы разрезать реплику по смене говорящего
+        "conf": sum(confs) / len(confs) if confs else 0.0,
+        "lang": lang,
         "spk": spk,
     }
+
+
+def _overlap(a, b):
+    return max(0.0, min(a["end"], b["end"]) - max(a["start"], b["start"]))
+
+
+# Буквы, которых в русском алфавите нет вовсе. Русская модель физически не может
+# их выдать, поэтому их появление — надёжный признак казахской речи. Уверенность
+# для этого не годится: Vosk уверенно ошибается на чужом языке и выдал
+# «жара и до семин» вместо «жарайды келісемін» с высоким баллом.
+KAZAKH_LETTERS = set("әғқңөұүһі")
+
+
+def _kazakh_letters(text):
+    return sum(1 for ch in (text or "").lower() if ch in KAZAKH_LETTERS)
+
+
+def _best_rival(word, foreign, used):
+    """Ближайшее по времени казахское слово, перекрывающее это не меньше чем наполовину."""
+    span = max(word["end"] - word["start"], 0.01)
+    best, best_share = None, 0.5
+    for candidate in foreign:
+        if id(candidate) in used:
+            continue
+        overlap = min(word["end"], candidate["end"]) - max(word["start"], candidate["start"])
+        share = overlap / span
+        if share > best_share:
+            best, best_share = candidate, share
+    return best
+
+
+def merge_by_confidence(primary, secondary, margin=None):
+    """Смешанная речь: подставляем казахские слова в русскую стенограмму.
+
+    Совещания здесь двуязычные, и одна модель на всю запись теряет вторую
+    половину. Сливаем на уровне слов, а не реплик: русская модель даёт основу,
+    а там, где казахская услышала слово с казахскими буквами, встаёт её вариант.
+    Заменять реплику целиком нельзя — вместе с казахской фразой портится
+    окружающий русский текст.
+    """
+    foreign = [word for utt in secondary for word in utt.get("words", [])
+               if _kazakh_letters(word.get("word"))]
+    if not foreign:
+        return primary, 0
+
+    replaced, used = 0, set()
+    for utt in primary:
+        words = []
+        for word in utt.get("words", []):
+            rival = _best_rival(word, foreign, used)
+            # Казахская модель выдумывает казахские слова и на русской речи:
+            # на нашей записи она услышала «сияқты» там, где сказано «сейчас».
+            # Поэтому мало найти слово с казахскими буквами — оно должно быть
+            # ещё и увереннее того, что услышала русская модель.
+            if rival is not None and rival.get("conf", 0.0) > word.get("conf", 0.0):
+                used.add(id(rival))
+                words.append(rival)
+                replaced += 1
+            else:
+                words.append(word)
+        utt["words"] = words
+        utt["text"] = " ".join(w["word"] for w in words)
+    return primary, replaced
+
 
 _model_cache = {}
 
@@ -175,7 +247,7 @@ def _assign_speakers(utterances):
     return utterances
 
 
-def _recognize(wav_path, model_path, spk_model, limit_seconds=None):
+def _recognize(wav_path, model_path, spk_model, limit_seconds=None, lang_tag=None):
     """Один проход одной моделью. Возвращает реплики и среднюю уверенность.
 
     limit_seconds ограничивает разбор началом записи — этого достаточно, чтобы
@@ -209,11 +281,11 @@ def _recognize(wav_path, model_path, spk_model, limit_seconds=None):
         chunk = [kept[0]]
         for word in kept[1:]:
             if word["start"] - chunk[-1]["end"] > PAUSE_SPLIT:
-                utterances.append(_utterance(chunk, result.get("spk")))
+                utterances.append(_utterance(chunk, result.get("spk"), lang_tag))
                 chunk = []
             chunk.append(word)
         if chunk:
-            utterances.append(_utterance(chunk, result.get("spk")))
+            utterances.append(_utterance(chunk, result.get("spk"), lang_tag))
 
     while True:
         data = audio.readframes(CHUNK)
@@ -247,22 +319,32 @@ def transcribe(audio_path, title=None):
         # делаем один раз и только победившей. Иначе большие модели гоняют всю
         # запись дважды, и на двух минутах это четыре минуты ожидания.
         forced = os.environ.get("STT_LANGUAGE", "").strip().lower()
-        probe = []
+        probe, mixed, replaced = [], False, 0
         if forced in models:
             lang = forced
         elif len(models) == 1:
             lang = next(iter(models))
         else:
             for probe_lang, probe_path in probe_models().items():
-                _, probe_conf = _recognize(wav_path, probe_path, None, PROBE_SECONDS)
+                _, probe_conf = _recognize(wav_path, probe_path, None, PROBE_SECONDS, probe_lang)
                 probe.append({"language": probe_lang, "model": probe_path.name,
                               "confidence": round(probe_conf, 3)})
             probe.sort(key=lambda p: p["confidence"], reverse=True)
             lang = probe[0]["language"]
+            # Модели разошлись слабо — речь, похоже, смешанная. Тогда разбираем
+            # обеими и выбираем победителя на каждой реплике, иначе казахские
+            # куски утонут в русской модели и наоборот.
+            mixed = len(probe) > 1 and (probe[0]["confidence"] - probe[1]["confidence"]) < MIXED_GAP
 
         model_path = models[lang]
-        utterances, confidence = _recognize(wav_path, model_path, spk_model)
+        utterances, confidence = _recognize(wav_path, model_path, spk_model, None, lang)
         model_name = model_path.name
+
+        if mixed:
+            other = probe[1]["language"]
+            rival, _ = _recognize(wav_path, models[other], spk_model, None, other)
+            utterances, replaced = merge_by_confidence(utterances, rival)
+            model_name = "%s + %s" % (model_path.name, models[other].name)
 
         # Отдельная модель диаризации размечает речь точнее, чем вектор голоса
         # на целую реплику Vosk: она видит смену говорящего внутри реплики.
@@ -300,5 +382,7 @@ def transcribe(audio_path, title=None):
             "speakers": len({s["speaker"] for s in segments}),
             "confidence": round(confidence, 3),
             "language_probe": probe,
+            "mixed_speech": mixed,
+            "replaced_utterances": replaced,
         },
     }
