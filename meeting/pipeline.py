@@ -40,10 +40,21 @@ def load_env():
         os.environ.setdefault(name.strip(), value.strip().strip('"').strip("'"))
 
 
+def stt_provider():
+    """Кто распознаёт речь. По умолчанию локально — этого требует ТЗ."""
+    choice = os.environ.get("STT_PROVIDER", "local").strip().lower()
+    if choice == "local":
+        from meeting import stt_local
+        return "local" if stt_local.available_models() else "demo"
+    if choice == "soniox" and os.environ.get("SONIOX_API_KEY"):
+        return "soniox"
+    return "demo"
+
+
 def mode():
     """Что сейчас доступно — показываем честно и в интерфейсе, и в логах."""
     return {
-        "transcription": "soniox" if os.environ.get("SONIOX_API_KEY") else "demo",
+        "transcription": stt_provider(),
         "analysis": "claude" if os.environ.get("ANTHROPIC_API_KEY") else "demo",
     }
 
@@ -104,15 +115,20 @@ def _tokens_to_segments(tokens):
 
 def transcribe(audio_path=None, title=None):
     """Возвращает {title, duration_sec, segments, transcription_mode}."""
-    api_key = os.environ.get("SONIOX_API_KEY", "").strip()
+    provider = stt_provider()
 
-    if not api_key or not audio_path:
+    if not audio_path or provider == "demo":
         sample = json.loads((SAMPLES / "planerka.json").read_text(encoding="utf-8"))
         sample["transcription_mode"] = "demo"
         if title:
             sample["title"] = title
         return sample
 
+    if provider == "local":
+        from meeting import stt_local
+        return stt_local.transcribe(audio_path, title)
+
+    api_key = os.environ.get("SONIOX_API_KEY", "").strip()
     file_id = _soniox_upload(audio_path, api_key)
     started = _soniox_request("/v1/transcriptions", {
         "file_id": file_id,
