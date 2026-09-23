@@ -139,12 +139,20 @@ def transcribe(audio_path=None, title=None):
     """Возвращает {title, duration_sec, segments, transcription_mode}."""
     provider = stt_provider()
 
-    if not audio_path or provider == "demo":
+    if not audio_path:  # кнопка «Разобрать пример»
         sample = json.loads((SAMPLES / "planerka.json").read_text(encoding="utf-8"))
         sample["transcription_mode"] = "demo"
         if title:
             sample["title"] = title
         return sample
+
+    if provider == "demo":
+        # Человек загрузил свою запись — молча подсунуть вместо неё демо-пример
+        # хуже, чем честно сказать, чего не хватает.
+        raise RuntimeError(
+            "Загруженную запись распознать нечем: локальные модели не установлены. "
+            "Выполните: python scripts/get_models.py — либо укажите STT_PROVIDER=soniox "
+            "и ключ SONIOX_API_KEY. Кнопка «Разобрать пример» работает без моделей.")
 
     if provider == "local":
         from meeting import stt_local
