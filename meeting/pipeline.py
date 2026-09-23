@@ -52,15 +52,25 @@ def stt_provider():
 
 
 def analysis_provider():
-    """Кто разбирает стенограмму: локальная модель, облачная или заглушка."""
+    """Кто разбирает стенограмму: локальная модель, облачная или заглушка.
+
+    Явная настройка важнее всего — иначе контрольный сценарий из README давал бы
+    разный результат на разных машинах. Без настройки ключ Anthropic считаем
+    осознанным выбором облака, иначе берём локальную модель, если она поднята.
+    """
     choice = os.environ.get("ANALYSIS_PROVIDER", "").strip().lower()
-    if choice != "claude":
+    if choice == "demo":
+        return "demo"
+    if choice == "claude":
+        return "claude" if os.environ.get("ANTHROPIC_API_KEY") else "demo"
+    if choice == "local":
         from meeting import analyze_local
-        if analyze_local.available():
-            return "local"
-        if choice == "local":
-            return "demo"  # попросили локально, но Ollama не отвечает
-    return "claude" if os.environ.get("ANTHROPIC_API_KEY") else "demo"
+        return "local" if analyze_local.available() else "demo"
+
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "claude"
+    from meeting import analyze_local
+    return "local" if analyze_local.available() else "demo"
 
 
 def mode():
