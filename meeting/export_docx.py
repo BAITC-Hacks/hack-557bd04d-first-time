@@ -81,6 +81,12 @@ def build(meeting, include_transcript=True):
     meta = "Дата разбора: {} · длительность {} · поручений: {}".format(
         meeting.get("created_at", ""), _fmt_time(meeting.get("duration_sec")),
         len(meeting.get("action_items", [])))
+    summary = meeting.get("deadline_summary") or {}
+    control = [name + ": " + str(summary[key]) for key, name in (
+        ("overdue", "просрочено"), ("today", "срок сегодня"),
+        ("soon", "горит"), ("unknown", "без срока")) if summary.get(key)]
+    if control:
+        meta += " · " + ", ".join(control)
     parts.append(_p(meta, size=18, space_after=240))
 
     if meeting.get("summary"):
@@ -96,16 +102,18 @@ def build(meeting, include_transcript=True):
     items = meeting.get("action_items") or []
     parts.append(_p("Поручения", bold=True, size=26, space_after=120))
     if items:
-        rows = [["Что", "Ответственный", "Срок", "Таймкод", "Статус"]]
+        rows = [["Что", "Ответственный", "Срок", "Дата", "Контроль", "Статус"]]
         for item in items:
+            deadline = item.get("deadline") or {}
             rows.append([
                 item.get("what", ""),
                 item.get("who") or "не назначен",
                 item.get("due") or "не назван",
-                _fmt_time(item.get("start")),
+                item.get("due_date") or "—",
+                deadline.get("label", ""),
                 STATUS_LABEL.get(item.get("status"), item.get("status", "")),
             ])
-        parts.append(_table(rows, [4200, 1900, 1500, 900, 1400]))
+        parts.append(_table(rows, [3600, 1600, 1300, 1100, 1400, 1100]))
         parts.append(_p("", space_after=160))
         # Цитаты — чтобы поручение можно было проверить по записи, а не верить на слово.
         parts.append(_p("Основания", bold=True, size=24, space_after=80))

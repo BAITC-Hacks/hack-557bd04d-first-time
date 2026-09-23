@@ -6,11 +6,14 @@
 import json
 from pathlib import Path
 
+from meeting import deadlines
+
 ROOT = Path(__file__).resolve().parent.parent
 STORAGE = ROOT / "storage" / "meetings"
 
 
 def save(meeting):
+    deadlines.annotate(meeting)
     STORAGE.mkdir(parents=True, exist_ok=True)
     path = STORAGE / (meeting["id"] + ".json")
     path.write_text(json.dumps(meeting, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -21,7 +24,9 @@ def load(meeting_id):
     path = STORAGE / (meeting_id + ".json")
     if not path.exists():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    # Статусы сроков пересчитываем при каждом чтении: вчерашнее «осталось 2 дня»
+    # сегодня уже неправда.
+    return deadlines.annotate(json.loads(path.read_text(encoding="utf-8")))
 
 
 def list_all():

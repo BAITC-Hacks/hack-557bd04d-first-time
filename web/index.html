@@ -48,6 +48,11 @@
   .chip { padding:2px 8px; border-radius:6px; background:var(--bg); border:1px solid var(--line); }
   .chip.who { color:var(--ink); font-weight:600; }
   .chip.grounded { color:var(--ok); }
+  .chip.overdue { color:#fff; background:var(--bad); border-color:transparent; font-weight:600; }
+  .chip.today { color:#fff; background:var(--warn); border-color:transparent; font-weight:600; }
+  .chip.soon { color:var(--warn); border-color:currentColor; font-weight:600; }
+  .task.overdue { border-left-color:var(--bad); }
+  .task.soon, .task.today { border-left-color:var(--warn); }
   .chip.ungrounded { color:var(--warn); }
   .quote { margin-top:8px; padding-left:10px; border-left:2px solid var(--line);
            color:var(--muted); font-size:13px; font-style:italic; }
@@ -180,13 +185,26 @@ function speakerBar(m) {
       : `<span class="chip who">${esc(n)}</span>`).join(" ") + `</div>`;
 }
 
+// Второй сценарий задания: руководителю важно видеть, что горит и что просрочено.
+function deadlineSummary(m) {
+  const d = m.deadline_summary || {};
+  const parts = [];
+  if (d.overdue) parts.push(`<span class="chip overdue">просрочено: ${d.overdue}</span>`);
+  if (d.today) parts.push(`<span class="chip today">срок сегодня: ${d.today}</span>`);
+  if (d.soon) parts.push(`<span class="chip soon">горит: ${d.soon}</span>`);
+  if (d.unknown) parts.push(`<span class="chip">без срока: ${d.unknown}</span>`);
+  return parts.join(" ");
+}
+
 function render(m) {
   const items = m.action_items.map(i => `
-    <div class="task ${i.status}" data-start="${i.start}">
+    <div class="task ${i.status} ${i.status === "pending" && i.deadline ? i.deadline.code : ""}" data-start="${i.start}">
       <div class="what">${esc(i.what)}</div>
       <div class="meta">
         <span class="chip who">${esc(i.who || "ответственный не назначен")}</span>
         <span class="chip">срок: ${esc(i.due || "не назван")}</span>
+        ${i.deadline && i.deadline.code !== "unknown"
+          ? `<span class="chip ${i.deadline.code}">${esc(i.deadline.label)}</span>` : ""}
         <span class="chip">${fmtTime(i.start)}</span>
         <span class="chip ${i.grounded ? "grounded" : "ungrounded"}">
           ${i.grounded ? "цитата проверена" : "цитата не найдена"}</span>
@@ -214,6 +232,7 @@ function render(m) {
         <span class="chip">длительность ${fmtTime(m.duration_sec)}</span>
         <span class="chip">поручений: ${m.action_items.length}</span>
         <span class="chip">решений: ${m.decisions.length}</span>
+        ${deadlineSummary(m)}
       </div>
     </div>
     <div class="grid">
