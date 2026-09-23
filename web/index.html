@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Протокол совещаний</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #fff; --ink: #14171f; --muted: #6b7280;
+    --line: #e3e6ec; --accent: #2f6df6; --ok: #197f52; --warn: #a45b10; --bad: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14161b; --card:#1c1f26; --ink:#e8eaf0; --muted:#9aa3b2;
+            --line:#2b303a; --accent:#6c9bff; --ok:#4cc08a; --warn:#d99a4e; --bad:#ef6a60; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding:18px 24px; border-bottom:1px solid var(--line); background:var(--card);
+           display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+  h1 { font-size:18px; margin:0; font-weight:650; }
+  .modes { margin-left:auto; display:flex; gap:8px; font-size:12px; }
+  .badge { padding:3px 9px; border-radius:99px; border:1px solid var(--line); color:var(--muted); }
+  .badge.live { color:var(--ok); border-color:currentColor; }
+  button { font:inherit; cursor:pointer; border-radius:8px; border:1px solid var(--line);
+           background:var(--card); color:var(--ink); padding:8px 14px; }
+  button.primary { background:var(--accent); color:#fff; border-color:transparent; font-weight:600; }
+  button:disabled { opacity:.5; cursor:default; }
+  main { max-width:1180px; margin:0 auto; padding:24px; }
+  .toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:20px; }
+  .hint { color:var(--muted); font-size:13px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; align-items:start; }
+  @media (max-width:900px) { .grid { grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:18px; margin-bottom:16px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted);
+             margin:0 0 12px; font-weight:600; }
+  .summary { font-size:15px; margin:0 0 12px; }
+  ul.plain { margin:0; padding-left:18px; }
+  ul.plain li { margin-bottom:6px; }
+  .task { border:1px solid var(--line); border-left:3px solid var(--accent); border-radius:8px;
+          padding:12px 14px; margin-bottom:10px; cursor:pointer; }
+  .task:hover { border-color:var(--accent); }
+  .task.confirmed { border-left-color:var(--ok); }
+  .task.rejected { border-left-color:var(--bad); opacity:.55; }
+  .task .what { font-weight:600; margin-bottom:6px; }
+  .meta { display:flex; gap:10px; flex-wrap:wrap; font-size:12.5px; color:var(--muted); align-items:center; }
+  .chip { padding:2px 8px; border-radius:6px; background:var(--bg); border:1px solid var(--line); }
+  .chip.who { color:var(--ink); font-weight:600; }
+  .chip.grounded { color:var(--ok); }
+  .chip.ungrounded { color:var(--warn); }
+  .quote { margin-top:8px; padding-left:10px; border-left:2px solid var(--line);
+           color:var(--muted); font-size:13px; font-style:italic; }
+  .acts { display:flex; gap:6px; margin-top:10px; }
+  .acts button { padding:4px 10px; font-size:12.5px; }
+  .seg { padding:8px 10px; border-radius:8px; margin-bottom:4px; }
+  .seg.hit { background:rgba(47,109,246,.12); outline:1px solid var(--accent); }
+  .seg .who { font-weight:600; font-size:13px; }
+  .seg .t { color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; margin-right:8px; }
+  .empty { color:var(--muted); text-align:center; padding:48px 12px; }
+  pre.export { white-space:pre-wrap; font-size:12.5px; background:var(--bg); padding:12px;
+               border-radius:8px; border:1px solid var(--line); max-height:320px; overflow:auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Протокол совещаний</h1>
+  <span class="hint">запись → расшифровка → поручения с ответственным и сроком</span>
+  <div class="modes" id="modes"></div>
+</header>
+
+<main>
+  <div class="toolbar">
+    <button class="primary" id="demo">Разобрать пример</button>
+    <button id="pick">Загрузить запись…</button>
+    <input type="file" id="file" accept="audio/*" hidden>
+    <span class="hint" id="status"></span>
+  </div>
+
+  <div id="out"><div class="empty">Нажмите «Разобрать пример» — готовая запись планёрки уже в проекте.</div></div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let current = null;
+
+function fmtTime(sec) {
+  const s = Math.max(0, Math.round(sec || 0));
+  return String(Math.floor(s / 60)).padStart(2, "0") + ":" + String(s % 60).padStart(2, "0");
+}
+const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, c => (
+  { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+async function loadModes() {
+  try {
+    const r = await fetch("/api/health").then(r => r.json());
+    const label = { soniox: "Soniox", claude: "Claude", demo: "демо" };
+    $("modes").innerHTML =
+      `<span class="badge ${r.modes.transcription !== "demo" ? "live" : ""}">речь: ${label[r.modes.transcription]}</span>` +
+      `<span class="badge ${r.modes.analysis !== "demo" ? "live" : ""}">разбор: ${label[r.modes.analysis]}</span>`;
+  } catch (e) { /* сервер ещё поднимается */ }
+}
+
+async function analyze(payload, note) {
+  $("status").textContent = note;
+  $("demo").disabled = $("pick").disabled = true;
+  try {
+    const res = await fetch("/api/analyze", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "не удалось разобрать");
+    current = data;
+    render(data);
+    $("status").textContent = "";
+  } catch (e) {
+    $("status").textContent = "Ошибка: " + e.message;
+  } finally {
+    $("demo").disabled = $("pick").disabled = false;
+    loadModes();
+  }
+}
+
+async function setStatus(itemId, status) {
+  const res = await fetch(`/api/meetings/${current.id}/items/${itemId}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+  if (res.ok) { current = await res.json(); render(current); }
+}
+
+function toMarkdown(m) {
+  const lines = [`# ${m.title}`, "", m.summary, "", "## Решения"];
+  m.decisions.forEach(d => lines.push(`- ${d}`));
+  lines.push("", "## Поручения", "", "| Что | Кто | Срок | Таймкод | Статус |", "|---|---|---|---|---|");
+  m.action_items.forEach(i => lines.push(
+    `| ${i.what} | ${i.who || "не назначен"} | ${i.due || "не назван"} | ${fmtTime(i.start)} | ${i.status} |`));
+  return lines.join("\n");
+}
+
+function render(m) {
+  const items = m.action_items.map(i => `
+    <div class="task ${i.status}" data-start="${i.start}">
+      <div class="what">${esc(i.what)}</div>
+      <div class="meta">
+        <span class="chip who">${esc(i.who || "ответственный не назначен")}</span>
+        <span class="chip">срок: ${esc(i.due || "не назван")}</span>
+        <span class="chip">${fmtTime(i.start)}</span>
+        <span class="chip ${i.grounded ? "grounded" : "ungrounded"}">
+          ${i.grounded ? "цитата проверена" : "цитата не найдена"}</span>
+        <span class="chip">уверенность ${Math.round((i.confidence || 0) * 100)}%</span>
+      </div>
+      <div class="quote">«${esc(i.quote)}»</div>
+      <div class="acts">
+        <button data-act="confirmed" data-id="${i.id}">Подтвердить</button>
+        <button data-act="rejected" data-id="${i.id}">Отклонить</button>
+      </div>
+    </div>`).join("");
+
+  const segs = m.segments.map(s => `
+    <div class="seg" data-start="${s.start}">
+      <div><span class="t">${fmtTime(s.start)}</span><span class="who">${esc(s.speaker)}</span></div>
+      <div>${esc(s.text)}</div>
+    </div>`).join("");
+
+  $("out").innerHTML = `
+    <div class="card">
+      <h2>Совещание</h2>
+      <div style="font-size:17px;font-weight:650;margin-bottom:8px">${esc(m.title)}</div>
+      <p class="summary">${esc(m.summary)}</p>
+      <div class="meta">
+        <span class="chip">длительность ${fmtTime(m.duration_sec)}</span>
+        <span class="chip">поручений: ${m.action_items.length}</span>
+        <span class="chip">решений: ${m.decisions.length}</span>
+      </div>
+    </div>
+    <div class="grid">
+      <div>
+        <div class="card"><h2>Поручения</h2>${items || '<div class="hint">Поручений не найдено.</div>'}</div>
+        <div class="card"><h2>Решения</h2>
+          <ul class="plain">${m.decisions.map(d => `<li>${esc(d)}</li>`).join("")}</ul>
+        </div>
+        <div class="card"><h2>Экспорт</h2>
+          <button id="copy">Скопировать протокол</button>
+          <pre class="export">${esc(toMarkdown(m))}</pre>
+        </div>
+      </div>
+      <div class="card"><h2>Стенограмма</h2>${segs}</div>
+    </div>`;
+
+  // Клик по поручению подсвечивает момент, откуда оно взято — это и есть проверяемость.
+  $("out").querySelectorAll(".task").forEach(el => el.addEventListener("click", ev => {
+    if (ev.target.dataset.act) return;
+    const start = el.dataset.start;
+    $("out").querySelectorAll(".seg").forEach(s => s.classList.remove("hit"));
+    const seg = $("out").querySelector(`.seg[data-start="${start}"]`);
+    if (seg) { seg.classList.add("hit"); seg.scrollIntoView({ block: "center", behavior: "smooth" }); }
+  }));
+
+  $("out").querySelectorAll("[data-act]").forEach(b => b.addEventListener("click", () =>
+    setStatus(b.dataset.id, b.dataset.act)));
+
+  $("copy").addEventListener("click", () => {
+    navigator.clipboard.writeText(toMarkdown(m));
+    $("copy").textContent = "Скопировано";
+    setTimeout(() => ($("copy").textContent = "Скопировать протокол"), 1500);
+  });
+}
+
+$("demo").addEventListener("click", () => analyze({}, "Разбираю пример…"));
+$("pick").addEventListener("click", () => $("file").click());
+$("file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const buf = await file.arrayBuffer();
+  let bin = "";
+  const bytes = new Uint8Array(buf);
+  for (let i = 0; i < bytes.length; i += 8192) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 8192));
+  }
+  analyze({ filename: file.name, title: file.name, audio_b64: btoa(bin) },
+          "Расшифровываю запись, это может занять минуту…");
+  e.target.value = "";
+});
+
+loadModes();
+</script>
+</body>
+</html>
