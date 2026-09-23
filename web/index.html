@@ -23,7 +23,9 @@
   .badge.live { color:var(--ok); border-color:currentColor; }
   button { font:inherit; cursor:pointer; border-radius:8px; border:1px solid var(--line);
            background:var(--card); color:var(--ink); padding:8px 14px; }
-  button.primary { background:var(--accent); color:#fff; border-color:transparent; font-weight:600; }
+  button.primary, a.btn.primary { background:var(--accent); color:#fff; border-color:transparent; font-weight:600; }
+  a.btn { display:inline-block; text-decoration:none; padding:8px 14px; border-radius:8px;
+          border:1px solid var(--line); margin-right:8px; }
   button:disabled { opacity:.5; cursor:default; }
   main { max-width:1180px; margin:0 auto; padding:24px; }
   .toolbar { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:20px; }
@@ -198,6 +200,7 @@ function render(m) {
           <ul class="plain">${m.decisions.map(d => `<li>${esc(d)}</li>`).join("")}</ul>
         </div>
         <div class="card"><h2>Экспорт</h2>
+          <a class="btn primary" href="/api/meetings/${m.id}/export.docx" download>Скачать DOCX</a>
           <button id="copy">Скопировать протокол</button>
           <pre class="export">${esc(toMarkdown(m))}</pre>
         </div>

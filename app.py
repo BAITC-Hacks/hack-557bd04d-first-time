@@ -15,12 +15,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from meeting import pipeline, store  # noqa: E402
+from meeting import export_docx, pipeline, store  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
 WEB = ROOT / "web"
 PORT = int(os.environ.get("PORT", "8000"))
 MAX_BODY = 200 * 1024 * 1024
+DOCX_TYPE = ("application/vnd.openxmlformats-officedocument"
+             ".wordprocessingml.document")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -66,6 +68,19 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/meetings":
             return self._send(200, store.list_all())
+
+        if path.endswith("/export.docx"):
+            meeting = store.load(path.split("/")[3])
+            if not meeting:
+                return self._send(404, {"error": "не найдено"})
+            data = export_docx.build(meeting)
+            name = "protokol-%s.docx" % meeting["id"]
+            self.send_response(200)
+            self.send_header("Content-Type", DOCX_TYPE)
+            self.send_header("Content-Disposition", 'attachment; filename="%s"' % name)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            return self.wfile.write(data)
 
         if path.startswith("/api/meetings/"):
             meeting = store.load(path.rsplit("/", 1)[-1])
