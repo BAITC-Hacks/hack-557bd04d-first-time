@@ -37,6 +37,7 @@ def _utterance(words, spk):
         "start": round(words[0]["start"], 2),
         "end": round(words[-1]["end"], 2),
         "text": " ".join(w["word"] for w in words),
+        "words": words,  # нужны, чтобы разрезать реплику по смене говорящего
         "spk": spk,
     }
 
@@ -199,16 +200,31 @@ def transcribe(audio_path, title=None):
             attempts.append((confidence, lang, path.name, utterances))
         attempts.sort(key=lambda a: a[0], reverse=True)
         confidence, lang, model_name, utterances = attempts[0]
+
+        # Отдельная модель диаризации размечает речь точнее, чем вектор голоса
+        # на целую реплику Vosk: она видит смену говорящего внутри реплики.
+        from meeting import diarize
+        diarization = "vosk-xvector"
+        if diarize.available():
+            try:
+                segments = diarize.split_by_turns(utterances, diarize.turns(wav_path))
+                diarization = "pyannote+titanet"
+            except Exception as exc:  # не смогли — остаёмся на запасном способе
+                print("  диаризация недоступна, работаем по векторам Vosk: %s" % exc)
+                segments = None
+        else:
+            segments = None
     finally:
         try:
             os.unlink(wav_path)
         except OSError:
             pass
 
-    segments = [
-        {"start": u["start"], "end": u["end"], "speaker": u["speaker"], "text": u["text"]}
-        for u in _assign_speakers(utterances)
-    ]
+    if segments is None:
+        segments = [
+            {"start": u["start"], "end": u["end"], "speaker": u["speaker"], "text": u["text"]}
+            for u in _assign_speakers(utterances)
+        ]
     return {
         "title": title or Path(audio_path).stem,
         "duration_sec": round(segments[-1]["end"], 1) if segments else 0,
@@ -217,6 +233,8 @@ def transcribe(audio_path, title=None):
         "asr": {
             "model": model_name,
             "language": lang,
+            "diarization": diarization,
+            "speakers": len({s["speaker"] for s in segments}),
             "confidence": round(confidence, 3),
             "considered": [{"language": a[1], "model": a[2], "confidence": round(a[0], 3)}
                            for a in attempts],
