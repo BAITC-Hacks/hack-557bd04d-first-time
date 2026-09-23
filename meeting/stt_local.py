@@ -31,10 +31,8 @@ MIN_WORD_CONF = float(os.environ.get("MIN_WORD_CONF", "0.30"))
 PAUSE_SPLIT = float(os.environ.get("PAUSE_SPLIT", "0.9"))
 # Сколько секунд с начала записи слушаем, чтобы определить язык.
 PROBE_SECONDS = float(os.environ.get("PROBE_SECONDS", "45"))
-# Если модели на пробе разошлись меньше чем на столько, считаем речь смешанной
-# и разбираем обеими, выбирая победителя на каждой реплике.
-MIXED_GAP = float(os.environ.get("MIXED_GAP", "0.12"))
-# Насколько вторая модель должна быть увереннее, чтобы заменить реплику.
+# Смешанная речь: разбираем запись обеими моделями и подставляем казахские слова
+# в русскую основу. STT_MIXED=0 выключает и экономит примерно половину времени.
 MIXED_MARGIN = float(os.environ.get("MIXED_MARGIN", "0.05"))
 CHUNK = 8000
 
@@ -90,6 +88,7 @@ def merge_by_confidence(primary, secondary, margin=None):
     Заменять реплику целиком нельзя — вместе с казахской фразой портится
     окружающий русский текст.
     """
+    margin = MIXED_MARGIN if margin is None else margin
     foreign = [word for utt in secondary for word in utt.get("words", [])
                if _kazakh_letters(word.get("word"))]
     if not foreign:
@@ -104,7 +103,7 @@ def merge_by_confidence(primary, secondary, margin=None):
             # на нашей записи она услышала «сияқты» там, где сказано «сейчас».
             # Поэтому мало найти слово с казахскими буквами — оно должно быть
             # ещё и увереннее того, что услышала русская модель.
-            if rival is not None and rival.get("conf", 0.0) > word.get("conf", 0.0):
+            if rival is not None and rival.get("conf", 0.0) - word.get("conf", 0.0) > margin:
                 used.add(id(rival))
                 words.append(rival)
                 replaced += 1
@@ -331,10 +330,12 @@ def transcribe(audio_path, title=None):
                               "confidence": round(probe_conf, 3)})
             probe.sort(key=lambda p: p["confidence"], reverse=True)
             lang = probe[0]["language"]
-            # Модели разошлись слабо — речь, похоже, смешанная. Тогда разбираем
-            # обеими и выбираем победителя на каждой реплике, иначе казахские
-            # куски утонут в русской модели и наоборот.
-            mixed = len(probe) > 1 and (probe[0]["confidence"] - probe[1]["confidence"]) < MIXED_GAP
+            # Разрыв уверенностей на пробе казался хорошим признаком смешанной
+            # речи, но оказался бесполезным: на записи с казахской фразой он был
+            # 0.125, а на почти полностью русской записи из задания — 0.016.
+            # Поэтому на смешанную речь идём всегда, когда есть обе модели:
+            # пункт 4 задания важнее лишней минуты разбора.
+            mixed = len(probe) > 1 and os.environ.get("STT_MIXED", "1") != "0"
 
         model_path = models[lang]
         utterances, confidence = _recognize(wav_path, model_path, spk_model, None, lang)
