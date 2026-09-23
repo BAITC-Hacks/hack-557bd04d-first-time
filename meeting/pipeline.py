@@ -51,11 +51,23 @@ def stt_provider():
     return "demo"
 
 
+def analysis_provider():
+    """Кто разбирает стенограмму: локальная модель, облачная или заглушка."""
+    choice = os.environ.get("ANALYSIS_PROVIDER", "").strip().lower()
+    if choice != "claude":
+        from meeting import analyze_local
+        if analyze_local.available():
+            return "local"
+        if choice == "local":
+            return "demo"  # попросили локально, но Ollama не отвечает
+    return "claude" if os.environ.get("ANTHROPIC_API_KEY") else "demo"
+
+
 def mode():
     """Что сейчас доступно — показываем честно и в интерфейсе, и в логах."""
     return {
         "transcription": stt_provider(),
-        "analysis": "claude" if os.environ.get("ANTHROPIC_API_KEY") else "demo",
+        "analysis": analysis_provider(),
     }
 
 
@@ -286,33 +298,35 @@ def _parse_json(raw):
 def extract(transcript):
     """Возвращает {title, summary, decisions, action_items, analysis_mode}."""
     segments = transcript["segments"]
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    provider = analysis_provider()
+    prompt = PROMPT.replace("{transcript}", _format_transcript(segments))
 
-    if not api_key:
+    if provider == "demo":
         result = json.loads((SAMPLES / "planerka.analysis.json").read_text(encoding="utf-8"))
         result["analysis_mode"] = "demo"
         result["action_items"] = _ground(result["action_items"], segments)
         return result
 
-    try:
-        import anthropic
-    except ImportError:
-        raise RuntimeError("Не установлен пакет anthropic: pip install -r requirements.txt")
+    if provider == "local":
+        from meeting import analyze_local
+        result = analyze_local.analyze(prompt)
+        result["analysis_mode"] = "local"
+    else:
+        try:
+            import anthropic
+        except ImportError:
+            raise RuntimeError("Не установлен пакет anthropic: pip install -r requirements.txt")
 
-    client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
-        model=os.environ.get("ANALYSIS_MODEL", DEFAULT_MODEL),
-        max_tokens=16000,
-        thinking={"type": "adaptive"},
-        messages=[{
-            "role": "user",
-            "content": PROMPT.replace("{transcript}", _format_transcript(segments)),
-        }],
-    )
-    text = "".join(block.text for block in response.content if block.type == "text")
-
-    result = _parse_json(text)
-    result["analysis_mode"] = "claude"
+        client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"].strip())
+        response = client.messages.create(
+            model=os.environ.get("ANALYSIS_MODEL", DEFAULT_MODEL),
+            max_tokens=16000,
+            thinking={"type": "adaptive"},
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = "".join(block.text for block in response.content if block.type == "text")
+        result = _parse_json(text)
+        result["analysis_mode"] = "claude"
     result["speakers"] = _apply_speaker_names(result.get("speakers"), segments)
     result["action_items"] = _fill_self_assigned(
         _ground(result.get("action_items", []), segments))
